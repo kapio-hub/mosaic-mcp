@@ -1,0 +1,31 @@
+{
+  "name": "@kapio/mosaic-mcp",
+  "version": "0.0.1",
+  "description": "Mosaic MCP Kit: HTTP transport, sign-in through Mosaic (OAuth, JWKS), discovery and call log for MCP servers",
+  "main": "src/index.js",
+  "exports": {
+    ".": "./src/index.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "src/",
+    "fixtures/",
+    "README.md",
+    "LICENSE"
+  ],
+  "type": "commonjs",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "test": "node --test test/*.test.js",
+    "fixtures": "node scripts/make-fixtures.js"
+  },
+  "keywords": ["mcp", "model-context-protocol", "oauth", "mosaic"],
+  "author": "kapio",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/kapio-hub/mosaic-mcp.git"
+  }
+}

@@ -1,0 +1,25 @@
+name: publish
+# Publishes @kapio/mosaic-mcp to npm on a version tag, with provenance and
+# npm trusted publishing (OIDC): no npm token is stored in this repo.
+# Needs the npm organisation `kapio` with this workflow registered as trusted
+# publisher (ticket 201, decision 4a).
+on:
+  push:
+    tags: ['v*']
+permissions:
+  contents: read
+  id-token: write
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+      - run: npm install -g npm@latest
+      - run: npm test
+      - name: Tag matches package.json
+        run: test "v$(node -p "require('./package.json').version")" = "$GITHUB_REF_NAME"
+      - run: npm publish --provenance --access public
