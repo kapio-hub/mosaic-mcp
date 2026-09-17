@@ -62,7 +62,7 @@ Returns `{ server, listen(port), close(), describe(), issuer, resource, metadata
 | Way           | Shape                                                        |
 | ------------- | ------------------------------------------------------------ |
 | Mosaic token  | `{ via: 'oauth', email, sub, azp, scope }`                   |
-| static token  | `{ via: '<token name>', scope: <the token entry>, query }`   |
+| static token  | `{ via: '<token name>', scope: <the token entry without value>, query }` |
 
 The server decides what `scope.instances` and `scope.write` allow; the kit only finds the entry.
 
@@ -79,9 +79,9 @@ Resolves `{ sub, email, azp, exp, scope }` or rejects with `TokenError` whose `r
 
 `jwks` is a client from `createJwksClient({ uri })` or a plain `{ keys }` document.
 
-### `createJwksClient({ uri, fetch?, now?, ttlMs?, minRefreshMs? })`
+### `createJwksClient({ uri, fetch?, now?, ttlMs?, minRefreshMs?, fetchTimeoutMs? })`
 
-Caches the key set for ten minutes. An unknown `kid` reloads once, at most once per minute, then counts as unknown. With the issuer unreachable, cached keys keep working.
+Caches the key set for ten minutes. An unknown `kid` reloads once, at most once per minute, then counts as unknown. With the issuer unreachable or the fetch hanging (aborted after `fetchTimeoutMs`, default 5000 ms), cached keys keep working and no more than one reload attempt runs per minute.
 
 ### `matchToken(given, tokens)`
 

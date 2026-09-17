@@ -119,6 +119,52 @@ test('issuer unreachable with nothing cached refuses, with a stale cache still v
   assert.ok(await warm.getKey('fixture-main'));
 });
 
+test('Mosaic weg: repeated calls on an expired cache do not repeat the fetch', async () => {
+  const calls = [];
+  let up = true;
+  const fetch = async (uri) => {
+    calls.push(uri);
+    if (!up) throw new Error('ECONNREFUSED');
+    return { ok: true, status: 200, json: async () => fx.jwks };
+  };
+  let clock = at();
+  const jwks = createJwksClient({ uri: 'https://x/jwks', fetch, now: () => clock });
+  assert.ok(await jwks.getKey('fixture-main'), 'primes the cache while Mosaic is up');
+  assert.strictEqual(calls.length, 1);
+
+  up = false;
+  clock += 11 * 60_000; // TTL expired
+  for (let i = 0; i < 20; i++) {
+    assert.ok(await jwks.getKey('fixture-main'), 'the stale cache keeps verifying while Mosaic is down');
+  }
+  assert.strictEqual(calls.length, 2, '20 calls trigger one throttled reload attempt, not 20 fetches');
+});
+
+test('Mosaic hängt: a call ends with the cache key once the fetch times out', async () => {
+  const calls = [];
+  let primed = false;
+  const fetch = (uri, opts) => {
+    calls.push(uri);
+    if (!primed) {
+      primed = true;
+      return Promise.resolve({ ok: true, status: 200, json: async () => fx.jwks });
+    }
+    // Simulates Mosaic hanging: the fetch never settles on its own, only the
+    // abort from AbortSignal.timeout ends it — same as a real stuck request.
+    return new Promise((_resolve, reject) => {
+      opts.signal.addEventListener('abort', () => reject(new DOMException('The operation was aborted.', 'AbortError')), { once: true });
+    });
+  };
+  let clock = at();
+  const jwks = createJwksClient({ uri: 'https://x/jwks', fetch, now: () => clock, fetchTimeoutMs: 30 });
+  assert.ok(await jwks.getKey('fixture-main'));
+
+  clock += 11 * 60_000; // TTL expired, next getKey hits the hanging fetch
+  const key = await jwks.getKey('fixture-main');
+  assert.ok(key, 'the call resolves from the stale cache instead of hanging on the stuck fetch');
+  assert.strictEqual(calls.length, 2);
+});
+
 test('JWKS entries with another algorithm are ignored', async () => {
   const valid = fx.cases.find((c) => c.name === 'valid');
   const rs256 = fx.jwks.keys.map((k) => ({ ...k, alg: 'RS256' }));

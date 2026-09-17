@@ -11,6 +11,9 @@
  *   - `exp` required, `exp` and `nbf` with 60 s leeway
  *   - JWKS cached for ten minutes; an unknown `kid` reloads once, at most
  *     once per minute, and is refused if still unknown
+ *   - a JWKS fetch that hangs or fails never blocks a call for longer than
+ *     the fetch timeout, and never fires more than once per minute; a known
+ *     `kid` keeps verifying from the stale cache in the meantime
  *
  * Only `node:crypto`; no dependency.
  */
@@ -20,6 +23,7 @@ const crypto = require('node:crypto');
 const LEEWAY_SECONDS = 60;
 const JWKS_TTL_MS = 10 * 60 * 1000;
 const JWKS_MIN_REFRESH_MS = 60 * 1000;
+const JWKS_FETCH_TIMEOUT_MS = 5000;
 
 class TokenError extends Error {
   /**
@@ -59,7 +63,7 @@ function keyFromJwk(jwk) {
 /**
  * JWKS client with cache and a throttled reload for unknown key ids.
  *
- * @param {{ uri: string, fetch?: typeof fetch, now?: () => number, ttlMs?: number, minRefreshMs?: number }} options
+ * @param {{ uri: string, fetch?: typeof fetch, now?: () => number, ttlMs?: number, minRefreshMs?: number, fetchTimeoutMs?: number }} options
  */
 function createJwksClient(options) {
   const uri = options && options.uri;
@@ -68,6 +72,7 @@ function createJwksClient(options) {
   const now = options.now || Date.now;
   const ttlMs = options.ttlMs ?? JWKS_TTL_MS;
   const minRefreshMs = options.minRefreshMs ?? JWKS_MIN_REFRESH_MS;
+  const fetchTimeoutMs = options.fetchTimeoutMs ?? JWKS_FETCH_TIMEOUT_MS;
 
   let keys = new Map();
   let loadedAt = -Infinity;
@@ -79,7 +84,7 @@ function createJwksClient(options) {
     lastAttempt = now();
     pending = (async () => {
       try {
-        const res = await doFetch(uri, { headers: { accept: 'application/json' } });
+        const res = await doFetch(uri, { headers: { accept: 'application/json' }, signal: AbortSignal.timeout(fetchTimeoutMs) });
         if (!res.ok) throw new TokenError('jwks', `JWKS answered ${res.status}`);
         const body = await res.json();
         const next = new Map();
@@ -98,11 +103,16 @@ function createJwksClient(options) {
     return pending;
   }
 
+  /** True once a reload may run again: the throttle window since the last attempt is over. */
+  function mayAttempt() {
+    return now() - lastAttempt >= minRefreshMs;
+  }
+
   return {
     uri,
     /** Public key for `kid`, or null when the issuer does not know it (after at most one reload). */
     async getKey(kid) {
-      if (now() - loadedAt >= ttlMs) {
+      if (now() - loadedAt >= ttlMs && mayAttempt()) {
         try {
           await load();
         } catch (err) {
@@ -111,7 +121,7 @@ function createJwksClient(options) {
         }
       }
       if (keys.has(kid)) return keys.get(kid);
-      if (now() - lastAttempt < minRefreshMs) return null;
+      if (!mayAttempt()) return null;
       try {
         await load();
       } catch {

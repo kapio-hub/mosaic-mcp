@@ -52,6 +52,12 @@ function defaultLog(line) {
   process.stdout.write(`${JSON.stringify(line)}\n`);
 }
 
+/** A token entry without its secret `value` — the handler gets `instances`/`write`, never the token itself. */
+function scopeOf(entry) {
+  const { value, ...rest } = entry;
+  return rest;
+}
+
 /**
  * @param {object} options
  * @param {string} options.service              name in health and log, e.g. `kapio-harvest-mcp`
@@ -104,7 +110,7 @@ function createMcpServer(options) {
 
     if (bearer) {
       const entry = matchToken(bearer, staticWays);
-      if (entry) return { via: entry.name, scope: entry, query: false };
+      if (entry) return { via: entry.name, scope: scopeOf(entry), query: false };
       if (!looksLikeJwt(bearer)) return { error: 'invalid_token' };
       try {
         const claims = await verifyAccessToken(bearer, { issuer, resource, jwks });
@@ -115,7 +121,7 @@ function createMcpServer(options) {
     }
     if (fromQuery && queryWayOpen) {
       const entry = matchToken(fromQuery, staticWays);
-      if (entry) return { via: entry.name, scope: entry, query: true };
+      if (entry) return { via: entry.name, scope: scopeOf(entry), query: true };
       return { error: 'invalid_token' };
     }
     return { error: fromQuery ? 'invalid_request' : null };

@@ -1,6 +1,6 @@
 {
   "name": "@kapio/mosaic-mcp",
-  "version": "0.0.1",
+  "version": "0.1.0",
   "description": "Mosaic MCP Kit: HTTP transport, sign-in through Mosaic (OAuth, JWKS), discovery and call log for MCP servers",
   "main": "src/index.js",
   "exports": {
