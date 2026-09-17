@@ -1,8 +1,8 @@
 name: publish
-# Publishes @kapio/mosaic-mcp to npm on a version tag, with provenance and
-# npm trusted publishing (OIDC): no npm token is stored in this repo.
-# Needs the npm organisation `kapio` with this workflow registered as trusted
-# publisher (ticket 201, decision 4a).
+# Publishes @kapio/mosaic-mcp to npm on a version tag, with provenance
+# (ticket 201, decision 4a). The publish token of the npm organisation `kapio`
+# is the repository secret NPM_TOKEN; the Docker builds of the servers never
+# need it, the package is public.
 on:
   push:
     tags: ['v*']
@@ -23,3 +23,5 @@ jobs:
       - name: Tag matches package.json
         run: test "v$(node -p "require('./package.json').version")" = "$GITHUB_REF_NAME"
       - run: npm publish --provenance --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
