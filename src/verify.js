@@ -83,8 +83,15 @@ function createJwksClient(options) {
     if (pending) return pending;
     lastAttempt = now();
     pending = (async () => {
+      // AbortSignal.timeout() backs its timer with an unref'd handle, so a
+      // hanging fetch that only this timer would abort can let the event
+      // loop see nothing left to do and end the process first (188b review,
+      // seen on Node 22 CI). A ref'd setTimeout keeps the loop open until it
+      // fires or is cleared.
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), fetchTimeoutMs);
       try {
-        const res = await doFetch(uri, { headers: { accept: 'application/json' }, signal: AbortSignal.timeout(fetchTimeoutMs) });
+        const res = await doFetch(uri, { headers: { accept: 'application/json' }, signal: controller.signal });
         if (!res.ok) throw new TokenError('jwks', `JWKS answered ${res.status}`);
         const body = await res.json();
         const next = new Map();
@@ -97,6 +104,7 @@ function createJwksClient(options) {
         keys = next;
         loadedAt = now();
       } finally {
+        clearTimeout(timer);
         pending = null;
       }
     })();
