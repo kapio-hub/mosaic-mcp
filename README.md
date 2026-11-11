@@ -53,9 +53,11 @@ Without `OAUTH_ISSUER` or `MCP_RESOURCE`, `createMcpServer` throws `ConfigError`
 | `extraHealth`     | function returning service fields for `/health`                                                          |
 | `tokens`          | `[{ name, value, instances?, write? }]`, static token ways; entries without value are dropped            |
 | `allowQueryToken` | `true` accepts `?token=` for static tokens; Mosaic tokens are only accepted by header                    |
+| `maxBodyBytes`    | POST body limit, default 4 MiB; over it the answer is 413 and the connection is dropped unread           |
+| `maxSessions`, `sessionTtlMs` | stored `initialize` sessions: cap (default 1000, oldest evicted) and lifetime (default 1 h)  |
 | `issuer`, `resource`, `allowedOrigins`, `jwks`, `log`, `env` | overrides, mainly for tests                                   |
 
-Returns `{ server, listen(port), close(), describe(), issuer, resource, metadataUrl }`. `describe()` gives `{ service, version, protocol, resource, issuer, metadataUrl }` for a registrar.
+Returns `{ server, listen(port), close(), describe(), sessionCount(), issuer, resource, metadataUrl }`. `describe()` gives `{ service, version, protocol, resource, issuer, metadataUrl }` for a registrar.
 
 `identity` passed to the handler:
 

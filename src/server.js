@@ -19,6 +19,8 @@ const { matchToken, normalizeTokens } = require('./tokens');
 
 const UA_MAX_BYTES = 120;
 const MAX_BODY_BYTES = 4 * 1024 * 1024;
+const SESSION_TTL_MS = 60 * 60 * 1000;
+const MAX_SESSIONS = 1000;
 
 class ConfigError extends Error {
   constructor(message) {
@@ -71,6 +73,9 @@ function scopeOf(entry) {
  * @param {string} [options.resource]           defaults to env MCP_RESOURCE
  * @param {string[]} [options.allowedOrigins]   defaults to env ALLOWED_ORIGINS or https://claude.ai
  * @param {object} [options.jwks]               JWKS client or `{ keys }`; defaults to `${issuer}/jwks`
+ * @param {number} [options.maxBodyBytes]      POST body limit, default 4 MiB; larger bodies get 413 and the connection is dropped
+ * @param {number} [options.sessionTtlMs]       lifetime of an initialize session, default 1 h
+ * @param {number} [options.maxSessions]        cap on stored sessions, default 1000; the oldest is evicted
  * @param {(line: object) => void} [options.log]
  * @param {NodeJS.ProcessEnv} [options.env]
  * @throws {ConfigError} when issuer or resource is missing — the caller exits
@@ -94,6 +99,27 @@ function createMcpServer(options) {
   const log = o.log || defaultLog;
   const handler = o.handler;
   const sessions = new Map();
+  const maxBodyBytes = o.maxBodyBytes ?? MAX_BODY_BYTES;
+  const sessionTtlMs = o.sessionTtlMs ?? SESSION_TTL_MS;
+  const maxSessions = o.maxSessions ?? MAX_SESSIONS;
+
+  function dropSession(id) {
+    const s = sessions.get(id);
+    if (s && s.keepAlive) clearInterval(s.keepAlive);
+    sessions.delete(id);
+  }
+
+  /** Expire old initialize sessions and keep room for one more; SSE sessions end with their connection. */
+  function makeRoomForSession() {
+    const now = Date.now();
+    for (const [id, s] of sessions) {
+      if (!s.keepAlive && now - s.created > sessionTtlMs) dropSession(id);
+    }
+    for (const [id, s] of sessions) {
+      if (sessions.size < maxSessions) break;
+      if (!s.keepAlive) dropSession(id);
+    }
+  }
 
   const metadata = {
     resource,
@@ -231,20 +257,26 @@ function createMcpServer(options) {
       const chunks = [];
       let size = 0;
       let tooLarge = false;
+      const rejectTooLarge = () => {
+        if (tooLarge) return;
+        tooLarge = true;
+        chunks.length = 0;
+        res.writeHead(413, { 'Content-Type': 'application/json', Connection: 'close' });
+        // Stop reading once the answer is out; the rest of the body is never buffered.
+        res.end(JSON.stringify({ jsonrpc: '2.0', id: null, error: { code: -32600, message: 'Request too large' } }), () => req.destroy());
+      };
+      if (Number(req.headers['content-length']) > maxBodyBytes) rejectTooLarge();
       req.on('data', (chunk) => {
+        if (tooLarge) return;
         size += chunk.length;
-        if (size > MAX_BODY_BYTES) {
-          tooLarge = true;
+        if (size > maxBodyBytes) {
+          rejectTooLarge();
           return;
         }
         chunks.push(chunk);
       });
       req.on('end', async () => {
-        if (tooLarge) {
-          res.writeHead(413, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ jsonrpc: '2.0', id: null, error: { code: -32600, message: 'Request too large' } }));
-          return;
-        }
+        if (tooLarge) return;
         let request;
         try {
           request = JSON.parse(Buffer.concat(chunks).toString('utf8'));
@@ -253,9 +285,15 @@ function createMcpServer(options) {
           res.end(JSON.stringify({ jsonrpc: '2.0', id: null, error: { code: -32700, message: `Parse error: ${e.message}` } }));
           return;
         }
+        if (request === null || typeof request !== 'object' || Array.isArray(request)) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ jsonrpc: '2.0', id: null, error: { code: -32600, message: 'Invalid Request: expected a JSON object' } }));
+          return;
+        }
         try {
           if (request.method === 'initialize') {
             sessionId = crypto.randomUUID();
+            makeRoomForSession();
             sessions.set(sessionId, { created: Date.now() });
           }
           const result = await handler.handleRequest(request, sessionId, identity);
@@ -278,7 +316,7 @@ function createMcpServer(options) {
         } catch {
           logCall(request, null, identity, req);
           res.writeHead(500, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ jsonrpc: '2.0', id: request.id ?? null, error: { code: -32603, message: 'Internal error' } }));
+          res.end(JSON.stringify({ jsonrpc: '2.0', id: request?.id ?? null, error: { code: -32603, message: 'Internal error' } }));
         }
       });
       return;
@@ -300,10 +338,7 @@ function createMcpServer(options) {
     if (req.method === 'DELETE') {
       const sessionId = req.headers['mcp-session-id'];
       const session = sessionId && sessions.get(sessionId);
-      if (session) {
-        if (session.keepAlive) clearInterval(session.keepAlive);
-        sessions.delete(sessionId);
-      }
+      if (session) dropSession(sessionId);
       res.writeHead(204);
       res.end();
       return;
@@ -322,13 +357,16 @@ function createMcpServer(options) {
     describe() {
       return { service: o.service, version: o.version ?? null, protocol: o.protocol ?? null, resource, issuer, metadataUrl };
     },
+    /** Number of stored sessions (initialize and SSE); for health checks and tests. */
+    sessionCount() {
+      return sessions.size;
+    },
     /** @returns {Promise<import('node:net').AddressInfo>} */
     listen(port) {
       return new Promise((resolve) => server.listen(port, () => resolve(server.address())));
     },
     close() {
-      for (const s of sessions.values()) if (s.keepAlive) clearInterval(s.keepAlive);
-      sessions.clear();
+      for (const id of [...sessions.keys()]) dropSession(id);
       server.closeAllConnections?.();
       return new Promise((resolve) => server.close(() => resolve()));
     }
