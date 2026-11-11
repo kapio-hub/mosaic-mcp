@@ -230,12 +230,12 @@ test('a body over the limit is answered 413 and not read to the end', async (t) 
       r.resume();
       resolve(r.statusCode);
     });
-    req.on('error', (e) => (e.code === 'ECONNRESET' || e.code === 'EPIPE' ? resolve('reset') : reject(e)));
+    req.on('error', reject);
     req.write('{"a":"' + 'a'.repeat(2048));
     setTimeout(() => req.write('a'.repeat(2048)), 50);
     setTimeout(() => req.destroy(), 500);
   });
-  assert.ok(status === 413 || status === 'reset', String(status));
+  assert.strictEqual(status, 413);
   assert.strictEqual(seen.length, 0);
   const small = await post(base, '/mcp', call('ok'), auth);
   assert.strictEqual(small.status, 200);
@@ -251,4 +251,28 @@ test('sessions expire and are capped', async (t) => {
   await new Promise((r) => setTimeout(r, 250));
   await init();
   assert.strictEqual(app.sessionCount(), 1, 'expired sessions are dropped on the next initialize');
+});
+
+test('an open SSE stream is never evicted by the session cap or expiry', async (t) => {
+  const { app, base } = await start({ maxSessions: 2, sessionTtlMs: 100 });
+  t.after(() => app.close());
+  const auth = { authorization: `Bearer ${EMERGENCY}` };
+  const { port } = new URL(base);
+  const sse = require('node:http').request({ port, method: 'GET', path: '/mcp', headers: { accept: 'text/event-stream', ...auth } });
+  await new Promise((resolve, reject) => {
+    sse.on('response', (r) => { r.resume(); resolve(); });
+    sse.on('error', reject);
+    sse.end();
+  });
+  t.after(() => sse.destroy());
+  assert.strictEqual(app.sessionCount(), 1);
+  const init = () => post(base, '/mcp', JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize', params: {} }), auth);
+  for (let i = 0; i < 6; i++) await init();
+  assert.strictEqual(app.sessionCount(), 2, 'cap evicts initialize sessions only, the SSE entry stays');
+  await new Promise((r) => setTimeout(r, 200));
+  await init();
+  assert.strictEqual(app.sessionCount(), 2, 'expiry drops the old initialize session, the SSE entry stays');
+  sse.destroy();
+  await new Promise((r) => setTimeout(r, 100));
+  assert.strictEqual(app.sessionCount(), 1, 'closing the stream removes its entry');
 });
