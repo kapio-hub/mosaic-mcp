@@ -189,3 +189,90 @@ test('handler failure answers 500 and still logs the call as failed', async (t) 
   assert.ok(!(await res.text()).includes('inner detail'));
   assert.strictEqual(lines[0].ok, false);
 });
+
+test('a JSON body that is not an object gets 400 -32600 and the server stays up', async (t) => {
+  const { app, base, seen } = await start();
+  t.after(() => app.close());
+  const auth = { authorization: `Bearer ${EMERGENCY}` };
+  for (const body of ['null', '[]', '5', '"x"', 'true']) {
+    const res = await post(base, '/mcp', body, auth);
+    assert.strictEqual(res.status, 400, body);
+    const json = await res.json();
+    assert.strictEqual(json.error.code, -32600, body);
+    assert.strictEqual(json.id, null);
+  }
+  assert.strictEqual(seen.length, 0, 'the handler never sees a non-object');
+  const alive = await post(base, '/mcp', call('ok'), auth);
+  assert.strictEqual(alive.status, 200);
+});
+
+test('a handler failure on a valid request still answers 500 with its id', async (t) => {
+  const { app, base } = await start({ handler: { handleRequest: async () => { throw new Error('boom'); } } });
+  t.after(() => app.close());
+  const res = await post(base, '/mcp', call('x'), { authorization: `Bearer ${EMERGENCY}` });
+  assert.strictEqual(res.status, 500);
+  assert.strictEqual((await res.json()).id, 7);
+});
+
+test('a body over the limit is answered 413 and not read to the end', async (t) => {
+  const { app, base, seen } = await start({ maxBodyBytes: 1024 });
+  t.after(() => app.close());
+  const auth = { authorization: `Bearer ${EMERGENCY}` };
+  // Declared length over the limit: refused before any byte is read.
+  const big = JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'x', pad: 'a'.repeat(4096) } });
+  const res = await post(base, '/mcp', big, auth);
+  assert.strictEqual(res.status, 413);
+  assert.strictEqual((await res.json()).error.code, -32600);
+  // Chunked body without a length: cut off once the limit is crossed.
+  const { port } = new URL(base);
+  const status = await new Promise((resolve, reject) => {
+    const req = require('node:http').request({ port, method: 'POST', path: '/mcp', headers: { 'content-type': 'application/json', ...auth } }, (r) => {
+      r.resume();
+      resolve(r.statusCode);
+    });
+    req.on('error', reject);
+    req.write('{"a":"' + 'a'.repeat(2048));
+    setTimeout(() => req.write('a'.repeat(2048)), 50);
+    setTimeout(() => req.destroy(), 500);
+  });
+  assert.strictEqual(status, 413);
+  assert.strictEqual(seen.length, 0);
+  const small = await post(base, '/mcp', call('ok'), auth);
+  assert.strictEqual(small.status, 200);
+});
+
+test('sessions expire and are capped', async (t) => {
+  const { app, base } = await start({ maxSessions: 3, sessionTtlMs: 150 });
+  t.after(() => app.close());
+  const auth = { authorization: `Bearer ${EMERGENCY}` };
+  const init = () => post(base, '/mcp', JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize', params: {} }), auth);
+  for (let i = 0; i < 10; i++) await init();
+  assert.strictEqual(app.sessionCount(), 3, 'cap holds, oldest evicted');
+  await new Promise((r) => setTimeout(r, 250));
+  await init();
+  assert.strictEqual(app.sessionCount(), 1, 'expired sessions are dropped on the next initialize');
+});
+
+test('an open SSE stream is never evicted by the session cap or expiry', async (t) => {
+  const { app, base } = await start({ maxSessions: 2, sessionTtlMs: 100 });
+  t.after(() => app.close());
+  const auth = { authorization: `Bearer ${EMERGENCY}` };
+  const { port } = new URL(base);
+  const sse = require('node:http').request({ port, method: 'GET', path: '/mcp', headers: { accept: 'text/event-stream', ...auth } });
+  await new Promise((resolve, reject) => {
+    sse.on('response', (r) => { r.resume(); resolve(); });
+    sse.on('error', reject);
+    sse.end();
+  });
+  t.after(() => sse.destroy());
+  assert.strictEqual(app.sessionCount(), 1);
+  const init = () => post(base, '/mcp', JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize', params: {} }), auth);
+  for (let i = 0; i < 6; i++) await init();
+  assert.strictEqual(app.sessionCount(), 2, 'cap evicts initialize sessions only, the SSE entry stays');
+  await new Promise((r) => setTimeout(r, 200));
+  await init();
+  assert.strictEqual(app.sessionCount(), 2, 'expiry drops the old initialize session, the SSE entry stays');
+  sse.destroy();
+  await new Promise((r) => setTimeout(r, 100));
+  assert.strictEqual(app.sessionCount(), 1, 'closing the stream removes its entry');
+});
